@@ -65,6 +65,7 @@ let isFullRenderAvailable = false;
 let isBusy = false;
 let isStlMode = false;
 let latestStlBlob = null;
+let latestBlobFormat = '3mf';
 let statusTimeout = null;
 
 // Status
@@ -144,11 +145,12 @@ export async function triggerRun(isPreview = false) {
     }
 
     latestStlBlob = await res.blob();
+    latestBlobFormat = '3mf';
 
     const buffer = await latestStlBlob.arrayBuffer();
-    const geometry = loader.parse(buffer);
+    const group = threeMFLoader.parse(buffer);
 
-    displayGeometry(geometry, isPreview);
+    displayGeometry(group, isPreview);
 
     isFullRenderAvailable = !isPreview;
 
@@ -173,14 +175,16 @@ export async function triggerRun(isPreview = false) {
   }
 }
 
-// Download rendered STL
+// Download the latest rendered or opened model.
 async function promptSaveFile() {
   if (!latestStlBlob) return;
 
-  const defaultName = `${loadedFileName}.stl`;
+  const extension = latestBlobFormat || '3mf';
+  const format = extension.toUpperCase();
+  const defaultName = `${loadedFileName}.${extension}`;
 
   let fileName = prompt(
-    'Filename for STL download:',
+    `Filename for ${format} download:`,
     defaultName
   );
 
@@ -190,9 +194,9 @@ async function promptSaveFile() {
 
   if (!fileName) return;
 
-  if (!fileName.toLowerCase().endsWith('.stl')) {
-    fileName += '.stl';
-  }
+  // Keep the actual file format consistent with the downloaded content.
+  fileName = fileName.replace(/\.(stl|3mf)$/i, '');
+  fileName += `.${extension}`;
 
   const url = URL.createObjectURL(latestStlBlob);
 
@@ -206,7 +210,7 @@ async function promptSaveFile() {
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 
-  setStatus('STL successfully exported.');
+  setStatus(`${format} successfully exported.`);
 }
 
 // Open server model
@@ -249,6 +253,7 @@ async function openServerModel(filename, displayFilename) {
       setStlMode(true, 'STL');
 
       latestStlBlob = await res.blob();
+      latestBlobFormat = 'stl';
 
       const buffer = await latestStlBlob.arrayBuffer();
       const geometry = loader.parse(buffer);
@@ -266,6 +271,7 @@ async function openServerModel(filename, displayFilename) {
       setStlMode(true, 'OBJ');
 
       latestStlBlob = null;
+      latestBlobFormat = 'obj';
 
       const text = await res.text();
       const group = objLoader.parse(text);
@@ -282,9 +288,10 @@ async function openServerModel(filename, displayFilename) {
     if (lowerName.endsWith('.3mf')) {
       setStlMode(true, '3MF');
 
-      latestStlBlob = null;
+      latestStlBlob = await res.blob();
+      latestBlobFormat = '3mf';
 
-      const buffer = await res.arrayBuffer();
+      const buffer = await latestStlBlob.arrayBuffer();
       const group = threeMFLoader.parse(buffer);
 
       displayGeometry(group, false, true);
@@ -443,6 +450,7 @@ fileInput.addEventListener('change', (e) => {
         [evt.target.result],
         { type: 'application/sla' }
       );
+      latestBlobFormat = 'stl';
 
       const geometry = loader.parse(evt.target.result);
 
@@ -463,6 +471,7 @@ fileInput.addEventListener('change', (e) => {
     setStlMode(true, 'OBJ');
 
     latestStlBlob = null;
+    latestBlobFormat = 'obj';
 
     const reader = new FileReader();
 
@@ -485,7 +494,8 @@ fileInput.addEventListener('change', (e) => {
   if (lowerName.endsWith('.3mf')) {
     setStlMode(true, '3MF');
 
-    latestStlBlob = null;
+    latestStlBlob = file;
+    latestBlobFormat = '3mf';
 
     const reader = new FileReader();
 

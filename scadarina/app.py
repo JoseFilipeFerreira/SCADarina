@@ -412,15 +412,17 @@ def render_model():
     task_id = str(uuid.uuid4())
 
     scad_path = os.path.join(UPLOAD_DIR, f"{task_id}.scad")
-    stl_path = os.path.join(UPLOAD_DIR, f"{task_id}.stl")
+    output_path = os.path.join(UPLOAD_DIR, f"{task_id}.3mf")
 
     def cleanup():
-        for path in (scad_path, stl_path):
+        for path in (scad_path, output_path):
             try:
                 if os.path.exists(path):
                     os.remove(path)
             except OSError:
-                app.logger.warning("Failed to remove temporary file: %s", path)
+                app.logger.warning(
+                    "Failed to remove temporary file: %s", path
+                )
 
     try:
         with open(scad_path, "w", encoding="utf-8") as f:
@@ -428,11 +430,10 @@ def render_model():
 
         cmd = [
             openscad,
-            "--backend=cgal",
-            "--export-format=binstl",
+            "--backend=manifold",
             scad_path,
             "-o",
-            stl_path
+            output_path
         ]
 
         if is_preview:
@@ -447,20 +448,20 @@ def render_model():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=60*5
+            timeout=60 * 5
         )
 
-        stl_generated = (
+        output_generated = (
             result.returncode == 0
-            and os.path.isfile(stl_path)
-            and os.path.getsize(stl_path) > 0
+            and os.path.isfile(output_path)
+            and os.path.getsize(output_path) > 0
         )
 
-        if not stl_generated:
+        if not output_generated:
             error_message = (
                 result.stderr.strip()
                 or result.stdout.strip()
-                or "OpenSCAD failed to generate STL"
+                or "OpenSCAD failed to generate 3MF"
             )
 
             cleanup()
@@ -470,16 +471,14 @@ def render_model():
             }), 500
 
         response = send_file(
-            stl_path,
-            mimetype="application/sla",
+            output_path,
+            mimetype="model/3mf",
             as_attachment=False,
-            download_name="model.stl"
+            download_name="model.3mf"
         )
 
-        # Delete temporary files after the response has been sent.
         response.call_on_close(cleanup)
 
-        # The SCAD source is no longer needed.
         try:
             os.remove(scad_path)
         except OSError:
@@ -494,7 +493,7 @@ def render_model():
         cleanup()
 
         return jsonify({
-            "error": "OpenSCAD rendering timed out (120 seconds)"
+            "error": "OpenSCAD rendering timed out (300 seconds)"
         }), 504
 
     except OSError:
