@@ -32,10 +32,7 @@ const modelsList = document.getElementById('models-list');
 const downloadBtn = document.getElementById('downloadBtn');
 const renderBtn = document.getElementById('renderBtn');
 const saveServerBtn = document.getElementById('saveServerBtn');
-const saveCopyServerChk = document.getElementById('saveCopyServerChk');
 const refreshModelsBtn = document.getElementById('refreshModelsBtn');
-const newFolderBtn = document.getElementById('newFolderBtn');
-const modelsFolderUploadInput = document.getElementById('modelsFolderUploadInput');
 const modelsCurrentPath = document.getElementById('modelsCurrentPath');
 const fileTitle = document.getElementById('file-title');
 const toggleCodeBtn = document.getElementById('toggleCodeBtn');
@@ -62,45 +59,6 @@ const scaleBar = document.getElementById('scale-bar');
 const scaleLabel = document.getElementById('scale-label');
 const fileInput = document.getElementById('fileInput');
 
-const engineDropdown = document.getElementById('engineDropdown');
-const engineSelectBtn = document.getElementById('engineSelectBtn');
-const engineSelectLabel = document.getElementById('engineSelectLabel');
-const engineDropdownMenu = document.getElementById('engineDropdownMenu');
-const STORAGE_KEY_ENGINE = 'scadarina_engine';
-let selectedEngine = 'stable';
-
-if (engineDropdown && engineSelectBtn && engineSelectLabel && engineDropdownMenu) {
-  const savedEngine = localStorage.getItem(STORAGE_KEY_ENGINE);
-  if (savedEngine && (savedEngine === 'stable' || savedEngine === 'nightly')) {
-    selectedEngine = savedEngine;
-    engineSelectLabel.textContent = selectedEngine;
-    engineDropdownMenu.querySelectorAll('.custom-dropdown-item').forEach(item => {
-      item.classList.toggle('active', item.dataset.value === selectedEngine);
-    });
-  }
-
-  engineSelectBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    engineDropdown.classList.toggle('open');
-  });
-
-  engineDropdownMenu.querySelectorAll('.custom-dropdown-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      selectedEngine = item.dataset.value;
-      engineSelectLabel.textContent = selectedEngine;
-      localStorage.setItem(STORAGE_KEY_ENGINE, selectedEngine);
-      engineDropdownMenu.querySelectorAll('.custom-dropdown-item').forEach(el => el.classList.remove('active'));
-      item.classList.add('active');
-      engineDropdown.classList.remove('open');
-    });
-  });
-
-  window.addEventListener('click', () => {
-    engineDropdown.classList.remove('open');
-  });
-}
-
 // State
 let loadedFileName = 'model';
 let isFullRenderAvailable = false;
@@ -109,17 +67,27 @@ let isStlMode = false;
 let latestStlBlob = null;
 let statusTimeout = null;
 
+// Status
 export function setStatus(text, isError = false, persistent = false) {
   const el = document.getElementById('status');
+
   if (statusTimeout) {
     clearTimeout(statusTimeout);
     statusTimeout = null;
   }
+
   if (!text) {
     el.style.display = 'none';
     return;
   }
-  el.innerHTML = text;
+
+  // Preview status intentionally supports HTML.
+  if (text.startsWith('PREVIEW ONLY')) {
+    el.innerHTML = text;
+  } else {
+    el.textContent = text;
+  }
+
   el.style.color = isError ? '#ff3b30' : '#ffffff';
   el.style.borderTopColor = isError ? '#ff3b30' : '#f09c2a';
   el.style.display = 'block';
@@ -131,255 +99,430 @@ export function setStatus(text, isError = false, persistent = false) {
   }
 }
 
+// Editor / viewer mode
 export function setStlMode(enabled, fileFormat = '3D') {
   isStlMode = enabled;
   renderBtn.disabled = enabled;
   saveServerBtn.disabled = enabled;
+
   setEditorStlMode(enabled, fileFormat);
 }
 
+// Rendering
 export async function triggerRun(isPreview = false) {
   if (isBusy || isStlMode) return false;
+
   isBusy = true;
-  setStatus(isPreview ? 'generating preview...' : 'rendering full model...', false, true);
+
+  setStatus(
+    isPreview ? 'generating preview...' : 'rendering full model...',
+    false,
+    true
+  );
+
   const code = getCode();
 
   try {
-    const chosenEngine = selectedEngine || 'stable';
-    const res = await fetch('/render', {
+    const res = await fetch('/api/render', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
-        code: code,
+        code,
         params: getCurrentParameters(),
-        preview: isPreview,
-        engine: chosenEngine
+        preview: isPreview
       })
     });
 
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({ error: 'Unknown server error' }));
-      throw new Error(errData.error || 'Server error');
+      const errData = await res.json().catch(() => ({
+        error: 'Unknown server error'
+      }));
+
+      throw new Error(errData.error || `HTTP ${res.status}`);
     }
 
     latestStlBlob = await res.blob();
+
     const buffer = await latestStlBlob.arrayBuffer();
     const geometry = loader.parse(buffer);
+
     displayGeometry(geometry, isPreview);
 
     isFullRenderAvailable = !isPreview;
+
     if (isPreview) {
-      setStatus('PREVIEW ONLY<br><span style="font-size:11px; opacity:0.85; font-style:italic;">click `full render` for final quality</span>', false, true);
+      setStatus(
+        'PREVIEW ONLY<br><span style="font-size:11px; opacity:0.85; font-style:italic;">click `full render` for final quality</span>',
+        false,
+        true
+      );
     } else {
-      setStatus('render completed.', false, false);
+      setStatus('render completed.');
     }
-    isBusy = false;
+
     return true;
+
   } catch (err) {
-    setStatus('Error: ' + err.message, true, true);
-    isBusy = false;
+    setStatus(`Error: ${err.message}`, true, true);
     return false;
+
+  } finally {
+    isBusy = false;
   }
 }
 
+// Download rendered STL
 async function promptSaveFile() {
   if (!latestStlBlob) return;
-  const defaultName = `${loadedFileName}.stl`;
-  let fileName = prompt('Filename for STL download:', defaultName);
-  if (!fileName) return;
-  if (!fileName.toLowerCase().endsWith('.stl')) fileName += '.stl';
 
-  // Download file to client
+  const defaultName = `${loadedFileName}.stl`;
+
+  let fileName = prompt(
+    'Filename for STL download:',
+    defaultName
+  );
+
+  if (!fileName) return;
+
+  fileName = fileName.trim();
+
+  if (!fileName) return;
+
+  if (!fileName.toLowerCase().endsWith('.stl')) {
+    fileName += '.stl';
+  }
+
   const url = URL.createObjectURL(latestStlBlob);
+
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-  setStatus('STL successfully exported.');
 
-  // If checked, save copy to /models/export
-  if (saveCopyServerChk && saveCopyServerChk.checked) {
-    try {
-      const formData = new FormData();
-      formData.append('file', latestStlBlob, fileName);
-      formData.append('filename', fileName);
-      const res = await fetch('/api/models/export', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setStatus(`STL exported & copy saved to /models/_export/${data.filename}`);
-      } else {
-        setStatus(`Export copy error: ${data.error}`, true);
-      }
-    } catch (err) {
-      setStatus(`Failed to save export copy: ${err.message}`, true);
-    }
-  }
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  setStatus('STL successfully exported.');
 }
 
-async function openServerModel(relPath, displayFilename) {
+// Open server model
+async function openServerModel(filename, displayFilename) {
   clearScene();
+
   setStatus(`opening ${displayFilename}...`, false, true);
+
   try {
-    const res = await fetch(`/api/models/file?path=${encodeURIComponent(relPath)}`);
-    if (!res.ok) throw new Error('Error retrieving file');
+    const res = await fetch(
+      `/api/models/${encodeURIComponent(filename)}`
+    );
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+
+      throw new Error(
+        error.error || `Error retrieving file (${res.status})`
+      );
+    }
 
     loadedFileName = displayFilename.replace(/\.[^/.]+$/, '');
-    setActiveServerFile(relPath);
+
+    setActiveServerFile(filename);
     fileTitle.textContent = displayFilename;
 
     document.querySelectorAll('.file-entry').forEach((el) => {
       const nameSpan = el.querySelector('.file-name-label');
-      el.classList.toggle('active', nameSpan && nameSpan.textContent === displayFilename);
+
+      el.classList.toggle(
+        'active',
+        nameSpan && nameSpan.textContent === displayFilename
+      );
     });
 
     const lowerName = displayFilename.toLowerCase();
+
+    // STL
     if (lowerName.endsWith('.stl')) {
       setStlMode(true, 'STL');
+
       latestStlBlob = await res.blob();
+
       const buffer = await latestStlBlob.arrayBuffer();
       const geometry = loader.parse(buffer);
+
       displayGeometry(geometry, false, true);
+
       isFullRenderAvailable = true;
-      setStatus(`${displayFilename} loaded.`, false, false);
-      return;
-    } else if (lowerName.endsWith('.obj')) {
-      setStlMode(true, 'OBJ');
-      latestStlBlob = null;
-      const text = await res.text();
-      const group = objLoader.parse(text);
-      displayGeometry(group, false, true);
-      isFullRenderAvailable = false;
-      setStatus(`${displayFilename} loaded.`, false, false);
-      return;
-    } else if (lowerName.endsWith('.3mf')) {
-      setStlMode(true, '3MF');
-      latestStlBlob = null;
-      const buffer = await res.arrayBuffer();
-      const group = threeMFLoader.parse(buffer);
-      displayGeometry(group, false, true);
-      isFullRenderAvailable = false;
-      setStatus(`${displayFilename} loaded.`, false, false);
+
+      setStatus(`${displayFilename} loaded.`);
       return;
     }
 
+    // OBJ
+    if (lowerName.endsWith('.obj')) {
+      setStlMode(true, 'OBJ');
+
+      latestStlBlob = null;
+
+      const text = await res.text();
+      const group = objLoader.parse(text);
+
+      displayGeometry(group, false, true);
+
+      isFullRenderAvailable = false;
+
+      setStatus(`${displayFilename} loaded.`);
+      return;
+    }
+
+    // 3MF
+    if (lowerName.endsWith('.3mf')) {
+      setStlMode(true, '3MF');
+
+      latestStlBlob = null;
+
+      const buffer = await res.arrayBuffer();
+      const group = threeMFLoader.parse(buffer);
+
+      displayGeometry(group, false, true);
+
+      isFullRenderAvailable = false;
+
+      setStatus(`${displayFilename} loaded.`);
+      return;
+    }
+
+    // SCAD / CSG
     setStlMode(false);
+
     const data = await res.json();
+
     setCode(data.content);
 
     isFullRenderAvailable = false;
+
     parseParameters();
+
     await triggerRun(true);
+
   } catch (err) {
-    setStatus('Error: ' + err.message, true);
+    console.error('Error opening model:', err);
+    setStatus(`Error: ${err.message}`, true);
   }
 }
 
-// Event Listeners for Toolbar Actions
+// Toolbar actions
 downloadBtn.addEventListener('click', async () => {
   if (isStlMode) {
     await promptSaveFile();
     return;
   }
+
   if (!isFullRenderAvailable) {
-    setStatus('No final render available. Rendering model first...', false, true);
+    setStatus(
+      'No final render available. Rendering model first...',
+      false,
+      true
+    );
+
     const success = await triggerRun(false);
+
     if (!success) return;
   }
+
   await promptSaveFile();
 });
 
-renderBtn.addEventListener('click', () => triggerRun(false));
+renderBtn.addEventListener('click', () => {
+  triggerRun(false);
+});
 
+// Save SCAD to server
 saveServerBtn.addEventListener('click', async () => {
   const defaultName = `${loadedFileName}.scad`;
-  const targetName = prompt('Filename to save into /models:', defaultName);
+
+  const targetName = prompt(
+    'Filename to save into /models:',
+    defaultName
+  );
+
   if (!targetName) return;
 
+  let filename = targetName.trim();
+
+  if (!filename) return;
+
+  if (!filename.toLowerCase().endsWith('.scad')) {
+    filename += '.scad';
+  }
+
   setStatus('Saving file to server...');
+
   try {
+    const formData = new FormData();
+
+    formData.append(
+      'file',
+      new Blob([getCode()], {
+        type: 'text/plain'
+      }),
+      filename
+    );
+
+    formData.append('filename', filename);
+
     const res = await fetch('/api/models', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: targetName, code: getCode() })
+      body: formData
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
+
+    const raw = await res.text();
+
+    let data;
+
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error(
+        `Invalid server response (HTTP ${res.status}): ${raw.substring(0, 200)}`
+      );
+    }
+
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
 
     loadedFileName = data.filename.replace(/\.[^/.]+$/, '');
+
     setActiveServerFile(data.filename);
+
     fileTitle.textContent = data.filename;
-    setStatus(`Saved as ${data.filename}`);
-    loadServerModels();
+
+    setStatus(`Saved as /models/${data.filename}`);
+
+    await loadServerModels();
+
   } catch (err) {
-    setStatus('Save error: ' + err.message, true);
+    setStatus(`Save error: ${err.message}`, true);
   }
 });
 
+// Open local file
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files[0];
+
   if (!file) return;
+
   clearScene();
+
   setStatus(`opening ${file.name}...`, false, true);
+
   setActiveServerFile(null);
+
   loadedFileName = file.name.replace(/\.[^/.]+$/, '');
+
   fileTitle.textContent = file.name;
-  document.querySelectorAll('.file-entry').forEach((el) => el.classList.remove('active'));
+
+  document.querySelectorAll('.file-entry').forEach((el) => {
+    el.classList.remove('active');
+  });
 
   const lowerName = file.name.toLowerCase();
+
+  // STL
   if (lowerName.endsWith('.stl')) {
     setStlMode(true, 'STL');
+
     const reader = new FileReader();
+
     reader.onload = (evt) => {
-      latestStlBlob = new Blob([evt.target.result], { type: 'application/sla' });
+      latestStlBlob = new Blob(
+        [evt.target.result],
+        { type: 'application/sla' }
+      );
+
       const geometry = loader.parse(evt.target.result);
+
       displayGeometry(geometry, false, true);
+
       isFullRenderAvailable = true;
-      setStatus(`${file.name} loaded.`, false, false);
+
+      setStatus(`${file.name} loaded.`);
     };
+
     reader.readAsArrayBuffer(file);
-    return;
-  } else if (lowerName.endsWith('.obj')) {
-    setStlMode(true, 'OBJ');
-    latestStlBlob = null;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const group = objLoader.parse(evt.target.result);
-      displayGeometry(group, false, true);
-      isFullRenderAvailable = false;
-      setStatus(`${file.name} loaded.`, false, false);
-    };
-    reader.readAsText(file);
-    return;
-  } else if (lowerName.endsWith('.3mf')) {
-    setStlMode(true, '3MF');
-    latestStlBlob = null;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const group = threeMFLoader.parse(evt.target.result);
-      displayGeometry(group, false, true);
-      isFullRenderAvailable = false;
-      setStatus(`${file.name} loaded.`, false, false);
-    };
-    reader.readAsArrayBuffer(file);
+
     return;
   }
 
+  // OBJ
+  if (lowerName.endsWith('.obj')) {
+    setStlMode(true, 'OBJ');
+
+    latestStlBlob = null;
+
+    const reader = new FileReader();
+
+    reader.onload = (evt) => {
+      const group = objLoader.parse(evt.target.result);
+
+      displayGeometry(group, false, true);
+
+      isFullRenderAvailable = false;
+
+      setStatus(`${file.name} loaded.`);
+    };
+
+    reader.readAsText(file);
+
+    return;
+  }
+
+  // 3MF
+  if (lowerName.endsWith('.3mf')) {
+    setStlMode(true, '3MF');
+
+    latestStlBlob = null;
+
+    const reader = new FileReader();
+
+    reader.onload = (evt) => {
+      const group = threeMFLoader.parse(evt.target.result);
+
+      displayGeometry(group, false, true);
+
+      isFullRenderAvailable = false;
+
+      setStatus(`${file.name} loaded.`);
+    };
+
+    reader.readAsArrayBuffer(file);
+
+    return;
+  }
+
+  // SCAD / CSG
   setStlMode(false);
+
   const reader = new FileReader();
+
   reader.onload = (evt) => {
     setCode(evt.target.result);
+
     isFullRenderAvailable = false;
+
     parseParameters();
+
     triggerRun(true);
   };
+
   reader.readAsText(file);
 });
 
-// App Initialization
+// Initialize viewer
 initViewer({
   container,
   modeSolidBtn,
@@ -395,6 +538,7 @@ initViewer({
   scaleLabel
 });
 
+// Initialize editor
 initEditor(
   {
     editor,
@@ -409,10 +553,13 @@ initEditor(
       isFullRenderAvailable = false;
       triggerRun(true);
     },
+
     onColorChange: (hex) => {
       updateMeshColor(hex);
     },
-    onResize: onResize,
+
+    onResize,
+
     onCodeBlur: () => {
       isFullRenderAvailable = false;
     }
@@ -422,76 +569,106 @@ initEditor(
 // Toggle parameters sidebar
 toggleParamsBtn.addEventListener('click', () => {
   const isCollapsed = sidebarLeft.classList.toggle('collapsed');
+
   if (isCollapsed) {
     sidebarLeft.style.removeProperty('width');
   }
-  toggleParamsBtn.textContent = isCollapsed ? 'show parameters' : 'hide parameters';
+
+  toggleParamsBtn.textContent = isCollapsed
+    ? 'show parameters'
+    : 'hide parameters';
+
   onResize();
+
   setTimeout(onResize, 160);
 });
 
-// Resize parameters sidebar (sidebar-params)
+// Resize parameters sidebar
 let isResizingLeft = false;
+
 sidebarLeftResizer.addEventListener('mousedown', (e) => {
   e.preventDefault();
+
   isResizingLeft = true;
+
   sidebarLeftResizer.classList.add('resizing');
   sidebarLeft.classList.add('resizing');
+
   document.body.style.cursor = 'ew-resize';
   document.body.style.userSelect = 'none';
 });
 
 window.addEventListener('mousemove', (e) => {
   if (!isResizingLeft) return;
+
   const newWidth = Math.max(200, e.clientX);
+
   sidebarLeft.style.width = `${newWidth}px`;
+
   onResize();
 });
 
 window.addEventListener('mouseup', () => {
-  if (isResizingLeft) {
-    isResizingLeft = false;
-    sidebarLeftResizer.classList.remove('resizing');
-    sidebarLeft.classList.remove('resizing');
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  }
+  if (!isResizingLeft) return;
+
+  isResizingLeft = false;
+
+  sidebarLeftResizer.classList.remove('resizing');
+  sidebarLeft.classList.remove('resizing');
+
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
 });
 
+// Initialize models
 initModels(
   {
     modelsPanel,
     modelsList,
     modelsCurrentPath,
     refreshModelsBtn,
-    newFolderBtn,
-    modelsFolderUploadInput,
     resizer,
     sidebarLeft
   },
   {
     setStatus,
-    onOpenModel: openServerModel
+
+    onOpenModel: openServerModel,
+
+    onRenameModel: (oldFilename, newFilename) => {
+      loadedFileName = newFilename.replace(/\.[^/.]+$/, '');
+
+      fileTitle.textContent = newFilename;
+    }
   }
 );
 
-// Dynamic alignment so distance (export STL -> show parameters) matches (save to /models -> full render)
+// Dynamic toolbar alignment
 function alignCodeToggleBar() {
   const codeToggleBar = document.getElementById('code-toggle-bar');
-  if (!codeToggleBar || !saveServerBtn || !renderBtn || !downloadBtn) return;
+
+  if (!codeToggleBar || !saveServerBtn || !renderBtn || !downloadBtn) {
+    return;
+  }
+
   const saveRect = saveServerBtn.getBoundingClientRect();
   const renderRect = renderBtn.getBoundingClientRect();
   const downloadRect = downloadBtn.getBoundingClientRect();
+
   const gap = renderRect.left - saveRect.right;
+
   if (gap > 0) {
-    codeToggleBar.style.left = `${Math.round(downloadRect.right + gap)}px`;
+    codeToggleBar.style.left =
+      `${Math.round(downloadRect.right + gap)}px`;
   }
 }
 
-// Custom Tooltips System matching SCADarina design
+// Custom tooltips
 function initTooltips() {
   const tooltip = document.createElement('div');
+
   tooltip.id = 'custom-tooltip';
+
   document.body.appendChild(tooltip);
 
   let currentTarget = null;
@@ -499,10 +676,12 @@ function initTooltips() {
 
   document.addEventListener('mouseover', (e) => {
     const el = e.target.closest('[title], [data-tooltip]');
+
     if (!el) return;
 
     if (el.hasAttribute('title')) {
       const text = el.getAttribute('title');
+
       if (text) {
         el.setAttribute('data-tooltip', text);
         el.removeAttribute('title');
@@ -510,14 +689,18 @@ function initTooltips() {
     }
 
     const text = el.getAttribute('data-tooltip');
+
     if (!text) return;
 
     currentTarget = el;
+
     tooltip.textContent = text;
 
     clearTimeout(showTimeout);
+
     showTimeout = setTimeout(() => {
       if (currentTarget !== el) return;
+
       tooltip.style.display = 'block';
 
       const rect = el.getBoundingClientRect();
@@ -527,45 +710,55 @@ function initTooltips() {
       let top = rect.bottom + 6;
 
       if (left < 6) left = 6;
+
       if (left + tipRect.width > window.innerWidth - 6) {
         left = window.innerWidth - tipRect.width - 6;
       }
+
       if (top + tipRect.height > window.innerHeight - 6) {
         top = rect.top - tipRect.height - 6;
       }
 
       tooltip.style.left = `${Math.round(left)}px`;
       tooltip.style.top = `${Math.round(top)}px`;
+
       tooltip.classList.add('visible');
     }, 600);
   });
 
   document.addEventListener('mouseout', (e) => {
     if (!currentTarget) return;
+
     if (e.target.closest('[data-tooltip]') === currentTarget) {
       clearTimeout(showTimeout);
+
       currentTarget = null;
+
       tooltip.classList.remove('visible');
       tooltip.style.display = 'none';
     }
   });
 
   window.addEventListener('scroll', () => {
-    if (currentTarget) {
-      tooltip.classList.remove('visible');
-      tooltip.style.display = 'none';
-      currentTarget = null;
-    }
+    if (!currentTarget) return;
+
+    tooltip.classList.remove('visible');
+    tooltip.style.display = 'none';
+
+    currentTarget = null;
   }, true);
 }
 
-// Initial bootstrap
+// Bootstrap
 loadServerModels();
 parseParameters();
 triggerRun(true);
+
 alignCodeToggleBar();
 initTooltips();
+
 window.addEventListener('resize', alignCodeToggleBar);
-if (document.fonts && document.fonts.ready) {
+
+if (document.fonts?.ready) {
   document.fonts.ready.then(alignCodeToggleBar);
 }

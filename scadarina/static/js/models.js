@@ -2,331 +2,324 @@ let modelsPanel = null;
 let modelsList = null;
 let modelsCurrentPath = null;
 let refreshModelsBtn = null;
-let newFolderBtn = null;
-let modelsFolderUploadInput = null;
 let resizer = null;
 let sidebarLeft = null;
 
-let currentBrowserPath = '';
 let activeServerFile = null;
 let setStatus = null;
 let onOpenModel = null;
+let onRenameModel = null;
 
+const STORAGE_KEY_MODELS_HEIGHT = 'scadarina_models_panel_height';
+
+// Parse API responses consistently
+async function parseResponse(res) {
+  const raw = await res.text();
+
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(
+      `Invalid server response (HTTP ${res.status}): ${raw.substring(0, 200)}`
+    );
+  }
+}
+
+// Initialize
 export function initModels(elements, callbacks) {
   modelsPanel = elements.modelsPanel;
   modelsList = elements.modelsList;
   modelsCurrentPath = elements.modelsCurrentPath;
   refreshModelsBtn = elements.refreshModelsBtn;
-  newFolderBtn = elements.newFolderBtn;
-  modelsFolderUploadInput = elements.modelsFolderUploadInput;
   resizer = elements.resizer;
   sidebarLeft = elements.sidebarLeft;
 
   setStatus = callbacks.setStatus;
   onOpenModel = callbacks.onOpenModel;
+  onRenameModel = callbacks.onRenameModel;
 
-  const STORAGE_KEY_MODELS_HEIGHT = 'scadarina_models_panel_height';
+  // Restore panel height
   const savedHeight = localStorage.getItem(STORAGE_KEY_MODELS_HEIGHT);
+
   if (savedHeight && modelsPanel) {
     const parsed = parseInt(savedHeight, 10);
-    if (!isNaN(parsed) && parsed >= 60 && parsed <= (window.innerHeight - 200)) {
+
+    if (
+      !isNaN(parsed) &&
+      parsed >= 60 &&
+      parsed <= window.innerHeight - 200
+    ) {
       modelsPanel.style.height = `${parsed}px`;
     }
   }
 
+  // Resize panel
   let isResizing = false;
-  resizer.addEventListener('mousedown', () => {
+
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+
     isResizing = true;
+
     document.body.style.cursor = 'ns-resize';
     document.body.style.userSelect = 'none';
   });
 
   window.addEventListener('mousemove', (e) => {
     if (!isResizing) return;
+
     const sidebarRect = sidebarLeft.getBoundingClientRect();
     const newHeight = sidebarRect.bottom - e.clientY;
-    if (newHeight >= 60 && newHeight <= (window.innerHeight - 200)) {
+
+    if (
+      newHeight >= 60 &&
+      newHeight <= window.innerHeight - 200
+    ) {
       modelsPanel.style.height = `${newHeight}px`;
     }
   });
 
   window.addEventListener('mouseup', () => {
-    if (isResizing) {
-      isResizing = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      if (modelsPanel) {
-        localStorage.setItem(STORAGE_KEY_MODELS_HEIGHT, parseInt(modelsPanel.style.height, 10) || modelsPanel.offsetHeight);
-      }
+    if (!isResizing) return;
+
+    isResizing = false;
+
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+
+    if (modelsPanel) {
+      localStorage.setItem(
+        STORAGE_KEY_MODELS_HEIGHT,
+        parseInt(modelsPanel.style.height, 10) || modelsPanel.offsetHeight
+      );
     }
   });
 
   refreshModelsBtn.addEventListener('click', loadServerModels);
-
-  newFolderBtn.addEventListener('click', async () => {
-    const folderName = prompt('New folder name:');
-    if (!folderName) return;
-    try {
-      const res = await fetch('/api/models/folder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: currentBrowserPath, name: folderName })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      if (setStatus) setStatus(`Folder "${data.name}" created.`);
-      loadServerModels();
-    } catch (err) {
-      if (setStatus) setStatus(`Folder error: ${err.message}`, true);
-    }
-  });
-
-  modelsFolderUploadInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const targetDisplay = currentBrowserPath ? `/models/${currentBrowserPath}` : '/models';
-    if (setStatus) setStatus(`Uploading ${file.name} to ${targetDisplay}...`);
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('path', currentBrowserPath);
-      formData.append('filename', file.name);
-      const res = await fetch('/api/models/upload', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      if (setStatus) setStatus(`Uploaded ${data.filename}`);
-      loadServerModels();
-    } catch (err) {
-      if (setStatus) setStatus(`Upload error: ${err.message}`, true);
-    } finally {
-      modelsFolderUploadInput.value = '';
-    }
-  });
 }
 
+// Active file
 export function getActiveServerFile() {
   return activeServerFile;
 }
 
-export function setActiveServerFile(file) {
-  activeServerFile = file;
+export function setActiveServerFile(filename) {
+  activeServerFile = filename;
 }
 
-export function getCurrentBrowserPath() {
-  return currentBrowserPath;
-}
-
-export function setCurrentBrowserPath(path) {
-  currentBrowserPath = path;
-}
-
+// Load model list
 export async function loadServerModels() {
   try {
-    const url = `/api/models${currentBrowserPath ? `?path=${encodeURIComponent(currentBrowserPath)}` : ''}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    modelsList.innerHTML = '';
+    const res = await fetch('/api/models');
+    const data = await parseResponse(res);
 
-    modelsCurrentPath.innerHTML = '';
-    const rootLink = document.createElement('span');
-    rootLink.textContent = '/models';
-    rootLink.style.cursor = 'pointer';
-    rootLink.title = 'root folder';
-    rootLink.addEventListener('click', () => {
-      currentBrowserPath = '';
-      loadServerModels();
-    });
-    modelsCurrentPath.appendChild(rootLink);
-
-    if (currentBrowserPath) {
-      const parts = currentBrowserPath.split('/').filter(Boolean);
-      let accPath = '';
-      parts.forEach((part) => {
-        accPath += (accPath ? '/' : '') + part;
-        const thisPath = accPath;
-        const slashSpan = document.createElement('span');
-        slashSpan.textContent = '/';
-        slashSpan.style.color = '#666666';
-        const partSpan = document.createElement('span');
-        partSpan.textContent = part;
-        partSpan.style.cursor = 'pointer';
-        partSpan.title = `go to /${thisPath}`;
-        partSpan.addEventListener('click', () => {
-          currentBrowserPath = thisPath;
-          loadServerModels();
-        });
-        modelsCurrentPath.appendChild(slashSpan);
-        modelsCurrentPath.appendChild(partSpan);
-      });
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
     }
 
-    if (currentBrowserPath) {
-      const upLi = document.createElement('li');
-      upLi.className = 'file-entry folder-entry';
-      upLi.innerHTML = '<img src="/svg/folder.svg" class="folder-icon" alt=""><span class="file-name-label">/..</span>';
-      upLi.title = 'up one folder';
-      upLi.addEventListener('click', () => {
-        const parts = currentBrowserPath.split('/').filter(Boolean);
-        parts.pop();
-        currentBrowserPath = parts.join('/');
-        loadServerModels();
-      });
-      modelsList.appendChild(upLi);
+    const files = Array.isArray(data.files) ? data.files : [];
+
+    modelsList.replaceChildren();
+
+    if (modelsCurrentPath) {
+      modelsCurrentPath.textContent = '/models';
     }
 
-    const folders = data.folders || [];
-    const files = data.files || [];
-
-    if (folders.length === 0 && files.length === 0) {
+    if (files.length === 0) {
       const emptyLi = document.createElement('li');
-      emptyLi.innerHTML = '<span style="color:#888888; font-size:11px; padding:4px;">folder is empty</span>';
+
+      const message = document.createElement('span');
+
+      message.textContent = 'no models found';
+      message.style.color = '#888888';
+      message.style.fontSize = '11px';
+      message.style.padding = '4px';
+
+      emptyLi.appendChild(message);
       modelsList.appendChild(emptyLi);
+
       return;
     }
 
-    folders.forEach(folder => {
-      const relFolder = currentBrowserPath ? `${currentBrowserPath}/${folder}` : folder;
+    files.forEach((filename) => {
       const li = document.createElement('li');
-      li.className = 'file-entry folder-entry';
 
-      const icon = document.createElement('img');
-      icon.src = '/svg/folder.svg';
-      icon.className = 'folder-icon';
-      icon.alt = '';
-
-      const label = document.createElement('span');
-      label.className = 'file-name-label';
-      label.textContent = `/${folder}`;
-      label.title = `enter folder /${folder}`;
-      label.addEventListener('click', () => {
-        currentBrowserPath = relFolder;
-        loadServerModels();
-      });
-
-      const actions = document.createElement('div');
-      actions.className = 'file-actions';
-
-      const renBtn = document.createElement('button');
-      renBtn.className = 'file-action-btn';
-      renBtn.title = `rename folder /${folder}`;
-      renBtn.innerHTML = '<span class="btn-icon" style="-webkit-mask-image: url(/svg/rename.svg); mask-image: url(/svg/rename.svg);"></span>';
-      renBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        renameServerItem(relFolder, folder);
-      });
-
-      const delBtn = document.createElement('button');
-      delBtn.className = 'file-action-btn';
-      delBtn.title = `delete folder /${folder} permanently`;
-      delBtn.innerHTML = '<span class="btn-icon" style="-webkit-mask-image: url(/svg/delete.svg); mask-image: url(/svg/delete.svg);"></span>';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteServerItem(relFolder, folder, true);
-      });
-
-      actions.appendChild(renBtn);
-      actions.appendChild(delBtn);
-
-      li.appendChild(icon);
-      li.appendChild(label);
-      li.appendChild(actions);
-      modelsList.appendChild(li);
-    });
-
-    files.forEach(file => {
-      const relFile = currentBrowserPath ? `${currentBrowserPath}/${file}` : file;
-      const li = document.createElement('li');
       li.className = 'file-entry';
-      if (activeServerFile && (activeServerFile === relFile || activeServerFile === file)) {
+
+      if (activeServerFile === filename) {
         li.classList.add('active');
       }
 
+      // Filename
       const label = document.createElement('span');
+
       label.className = 'file-name-label';
-      label.textContent = file;
-      label.title = `open ${file} in viewer and editor`;
+      label.textContent = filename;
+      label.title = `open ${filename} in viewer and editor`;
+
       label.addEventListener('click', () => {
-        if (onOpenModel) {
-          onOpenModel(relFile, file);
-        }
+        onOpenModel?.(filename, filename);
       });
 
+      // Actions
       const actions = document.createElement('div');
+
       actions.className = 'file-actions';
 
+      // Download
       const dlBtn = document.createElement('button');
+
       dlBtn.className = 'file-action-btn';
-      dlBtn.title = `download ${file} to your computer`;
-      dlBtn.innerHTML = '<span class="btn-icon" style="-webkit-mask-image: url(/svg/download.svg); mask-image: url(/svg/download.svg);"></span>';
+      dlBtn.title = `download ${filename} to your computer`;
+
+      dlBtn.innerHTML =
+        '<span class="btn-icon" style="-webkit-mask-image: url(/svg/download.svg); mask-image: url(/svg/download.svg);"></span>';
+
       dlBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.location.href = `/api/models/download?path=${encodeURIComponent(relFile)}`;
+
+        window.location.href =
+          `/api/models/${encodeURIComponent(filename)}/download`;
       });
 
+      // Rename
       const renBtn = document.createElement('button');
+
       renBtn.className = 'file-action-btn';
-      renBtn.title = `rename ${file}`;
-      renBtn.innerHTML = '<span class="btn-icon" style="-webkit-mask-image: url(/svg/rename.svg); mask-image: url(/svg/rename.svg);"></span>';
+      renBtn.title = `rename ${filename}`;
+
+      renBtn.innerHTML =
+        '<span class="btn-icon" style="-webkit-mask-image: url(/svg/rename.svg); mask-image: url(/svg/rename.svg);"></span>';
+
       renBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        renameServerItem(relFile, file);
+
+        renameServerItem(filename, filename);
       });
 
+      // Delete
       const delBtn = document.createElement('button');
+
       delBtn.className = 'file-action-btn';
-      delBtn.title = `delete ${file} permanently`;
-      delBtn.innerHTML = '<span class="btn-icon" style="-webkit-mask-image: url(/svg/delete.svg); mask-image: url(/svg/delete.svg);"></span>';
+      delBtn.title = `delete ${filename} permanently`;
+
+      delBtn.innerHTML =
+        '<span class="btn-icon" style="-webkit-mask-image: url(/svg/delete.svg); mask-image: url(/svg/delete.svg);"></span>';
+
       delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        deleteServerItem(relFile, file, false);
+
+        deleteServerItem(filename, filename);
       });
 
-      actions.appendChild(dlBtn);
-      actions.appendChild(renBtn);
-      actions.appendChild(delBtn);
+      actions.append(dlBtn, renBtn, delBtn);
 
-      li.appendChild(label);
-      li.appendChild(actions);
+      li.append(label, actions);
+
       modelsList.appendChild(li);
     });
+
   } catch (err) {
-    modelsList.innerHTML = '<li style="color:#ff3b30; font-size:11px;">Error loading models</li>';
+    console.error('Error loading models:', err);
+
+    modelsList.replaceChildren();
+
+    const errorLi = document.createElement('li');
+
+    errorLi.textContent = `Error loading models: ${err.message}`;
+    errorLi.style.color = '#ff3b30';
+    errorLi.style.fontSize = '11px';
+
+    modelsList.appendChild(errorLi);
   }
 }
 
-export async function deleteServerItem(relPath, name, isFolder) {
-  const typeLabel = isFolder ? 'folder' : 'file';
-  if (!confirm(`Delete ${typeLabel} "${name}" from server?`)) return;
+// Delete model
+export async function deleteServerItem(filename, name) {
+  if (!confirm(`Delete file "${name}" from server?`)) {
+    return;
+  }
+
   try {
-    const res = await fetch(`/api/models/item?path=${encodeURIComponent(relPath)}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    if (setStatus) setStatus(`Deleted: ${name}`);
-    if (activeServerFile === relPath) activeServerFile = null;
-    loadServerModels();
+    const res = await fetch(
+      `/api/models/${encodeURIComponent(filename)}`,
+      {
+        method: 'DELETE'
+      }
+    );
+
+    const data = await parseResponse(res);
+
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+
+    if (activeServerFile === filename) {
+      activeServerFile = null;
+    }
+
+    setStatus?.(`Deleted: ${name}`);
+
+    await loadServerModels();
+
   } catch (err) {
-    if (setStatus) setStatus(`Delete error: ${err.message}`, true);
+    setStatus?.(`Delete error: ${err.message}`, true);
   }
 }
 
-export async function renameServerItem(relPath, oldName) {
-  const newName = prompt(`Rename "${oldName}" to:`, oldName);
-  if (!newName || newName === oldName) return;
+// Rename model
+export async function renameServerItem(filename, oldName) {
+  const newName = prompt(
+    `Rename "${oldName}" to:`,
+    oldName
+  );
+
+  if (!newName || newName.trim() === oldName) {
+    return;
+  }
+
+  const trimmedName = newName.trim();
+
+  if (
+    trimmedName === '.' ||
+    trimmedName === '..' ||
+    trimmedName.includes('/') ||
+    trimmedName.includes('\\')
+  ) {
+    setStatus?.('Invalid filename.', true);
+    return;
+  }
+
   try {
-    const res = await fetch('/api/models/rename', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ oldPath: relPath, newName: newName })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    if (setStatus) setStatus(`Renamed to "${data.newName}"`);
-    if (activeServerFile === relPath) activeServerFile = null;
-    loadServerModels();
+    const res = await fetch(
+      `/api/models/${encodeURIComponent(filename)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          newName: trimmedName
+        })
+      }
+    );
+
+    const data = await parseResponse(res);
+
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+
+    if (activeServerFile === filename) {
+      activeServerFile = data.filename;
+      onRenameModel?.(filename, data.filename);
+    }
+
+    setStatus?.(`Renamed to "${data.filename}"`);
+
+    await loadServerModels();
+
   } catch (err) {
-    if (setStatus) setStatus(`Rename error: ${err.message}`, true);
+    setStatus?.(`Rename error: ${err.message}`, true);
   }
 }

@@ -1,8 +1,11 @@
 import os
 import subprocess
 import uuid
-import json
-from flask import Flask, request, jsonify, send_file, render_template, send_from_directory
+import shutil
+import tempfile
+
+from flask import Flask, request, jsonify, send_file, send_from_directory
+
 
 APP_VERSION = "1.2"
 
@@ -13,229 +16,503 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 UPLOAD_DIR = "/tmp/scad_work"
 
+ALLOWED_MODEL_EXTENSIONS = (".scad", ".csg", ".stl", ".obj", ".3mf")
+
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-@app.route('/')
-def index():
-    return send_from_directory(STATIC_DIR, 'index.html')
 
-@app.route('/favicon.ico')
+# ---------------------------------------------------------
+# Static files
+# ---------------------------------------------------------
+
+@app.route("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.route("/favicon.ico")
 def favicon():
     return send_from_directory(
         STATIC_DIR,
-        'favicon.ico',
-        mimetype='image/x-icon',
+        "favicon.ico",
+        mimetype="image/x-icon",
         max_age=0
     )
 
-@app.route('/svg/<path:filename>')
+
+@app.route("/svg/<path:filename>")
 def serve_svg(filename):
     return send_from_directory(
-        os.path.join(STATIC_DIR, 'svg'),
+        os.path.join(STATIC_DIR, "svg"),
         filename,
-        mimetype='image/svg+xml'
+        mimetype="image/svg+xml"
     )
 
-def get_safe_path(rel_path):
-    rel_path = rel_path.strip().lstrip('/\\')
-    full_path = os.path.abspath(os.path.join(MODELS_DIR, rel_path))
-    if not full_path.startswith(os.path.abspath(MODELS_DIR)):
+
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+
+def validate_filename(filename):
+    """Validate a filename for the flat models directory."""
+
+    if not isinstance(filename, str):
+        raise ValueError("Invalid filename")
+
+    filename = filename.strip()
+
+    if (
+        not filename
+        or filename in (".", "..")
+        or "/" in filename
+        or "\\" in filename
+        or "\0" in filename
+    ):
+        raise ValueError("Invalid filename")
+
+    return filename
+
+
+def get_safe_path(filename):
+    """Resolve a filename directly inside MODELS_DIR."""
+
+    filename = validate_filename(filename)
+
+    base = os.path.realpath(MODELS_DIR)
+    path = os.path.join(base, filename)
+
+    # Do not allow symlinks in the models directory.
+    if os.path.islink(path):
+        raise ValueError("Symbolic links are not allowed")
+
+    full_path = os.path.realpath(path)
+
+    if os.path.commonpath([base, full_path]) != base:
         raise ValueError("Invalid path")
+
     return full_path
 
-@app.route('/api/models', methods=['GET'])
+
+def parse_json_response_data():
+    return request.get_json(silent=True) or {}
+
+
+def get_uploaded_filename():
+    """Get and validate the uploaded filename."""
+
+    if "file" not in request.files:
+        raise ValueError("No file uploaded")
+
+    file = request.files["file"]
+
+    filename = request.form.get("filename") or file.filename or ""
+    filename = validate_filename(filename)
+
+    if not file.filename:
+        raise ValueError("No filename provided")
+
+    return file, filename
+
+
+# ---------------------------------------------------------
+# Models API
+# ---------------------------------------------------------
+
+@app.route("/api/models", methods=["GET"])
 def list_models():
-    folder = request.args.get('path', '').strip()
     try:
-        target_dir = get_safe_path(folder)
-        if not os.path.exists(target_dir):
-            return jsonify({'current': folder, 'folders': [], 'files': []})
-        
-        folders = []
         files = []
-        for entry in os.scandir(target_dir):
-            if entry.name.startswith('.'):
-                continue
-            if entry.is_dir():
-                folders.append(entry.name)
-            elif entry.is_file() and entry.name.lower().endswith(('.scad', '.csg', '.stl', '.obj', '.3mf')):
-                files.append(entry.name)
-        
-        folders.sort(key=str.lower)
+
+        with os.scandir(MODELS_DIR) as entries:
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+
+                if entry.name == "_export":
+                    continue
+
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+
+                if entry.name.lower().endswith(ALLOWED_MODEL_EXTENSIONS):
+                    files.append(entry.name)
+
         files.sort(key=str.lower)
-        return jsonify({'current': folder.replace('\\', '/'), 'folders': folders, 'files': files})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/models/file', methods=['GET'])
-def load_model_file():
-    filepath = request.args.get('path', '').strip()
+        return jsonify({"files": files})
+
+    except OSError:
+        app.logger.exception("Failed to list models")
+        return jsonify({"error": "Failed to list models"}), 500
+
+
+# ---------------------------------------------------------
+# Get / open model
+# ---------------------------------------------------------
+
+@app.route("/api/models/<filename>", methods=["GET"])
+def get_model(filename):
     try:
-        path = get_safe_path(filepath)
-        if not os.path.exists(path) or os.path.isdir(path):
-            return jsonify({'error': 'File not found'}), 404
-        
-        lower = path.lower()
-        if lower.endswith('.stl'):
-            return send_file(path, mimetype='application/sla', as_attachment=False)
-        elif lower.endswith('.obj'):
-            return send_file(path, mimetype='text/plain', as_attachment=False)
-        elif lower.endswith('.3mf'):
-            return send_file(path, mimetype='application/vnd.ms-package.3dmanufacturing-3dmodel+xml', as_attachment=False)
-        
-        with open(path, 'r', encoding='utf-8') as f:
-            return jsonify({'filename': os.path.basename(path), 'path': filepath, 'content': f.read()})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        path = get_safe_path(filename)
 
-@app.route('/api/models/download', methods=['GET'])
-def download_model_file():
-    filepath = request.args.get('path', '').strip()
+        if not os.path.isfile(path):
+            return jsonify({"error": "File not found"}), 404
+
+        extension = os.path.splitext(filename)[1].lower()
+
+        content_types = {
+            ".stl": "application/sla",
+            ".obj": "text/plain",
+            ".3mf": "application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+        }
+
+        if extension in content_types:
+            return send_file(
+                path,
+                mimetype=content_types[extension],
+                as_attachment=False
+            )
+
+        if extension not in (".scad", ".csg"):
+            return jsonify({"error": "Unsupported file type"}), 415
+
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        return jsonify({
+            "filename": filename,
+            "path": filename,
+            "content": content
+        })
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    except OSError:
+        app.logger.exception("Failed to retrieve model: %s", filename)
+        return jsonify({"error": "Failed to retrieve model"}), 500
+
+
+# ---------------------------------------------------------
+# Download model
+# ---------------------------------------------------------
+
+@app.route("/api/models/<filename>/download", methods=["GET"])
+def download_model(filename):
     try:
-        path = get_safe_path(filepath)
-        if not os.path.exists(path) or os.path.isdir(path):
-            return jsonify({'error': 'File not found'}), 404
-        return send_file(path, as_attachment=True, download_name=os.path.basename(path))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        path = get_safe_path(filename)
 
-@app.route('/api/models/upload', methods=['POST'])
-def upload_to_folder():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    file = request.files['file']
-    folder = request.form.get('path', '').strip()
-    filename = request.form.get('filename', file.filename).strip()
-    if not filename:
-        return jsonify({'error': 'No filename provided'}), 400
+        if not os.path.isfile(path):
+            return jsonify({"error": "File not found"}), 404
+
+        return send_file(
+            path,
+            as_attachment=True,
+            download_name=filename
+        )
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    except OSError:
+        app.logger.exception("Failed to download model: %s", filename)
+        return jsonify({"error": "Failed to download file"}), 500
+
+
+# ---------------------------------------------------------
+# Create / upload model
+# ---------------------------------------------------------
+
+@app.route("/api/models", methods=["POST"])
+def create_model():
+    try:
+        file, filename = get_uploaded_filename()
+
+        if not filename.lower().endswith(".scad"):
+            return jsonify({
+                "error": "Only SCAD files are supported"
+            }), 415
+
+        dest_path = get_safe_path(filename)
+
+        # Exclusive creation: never overwrite an existing model.
+        try:
+            fd = os.open(
+                dest_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644
+            )
+        except FileExistsError:
+            return jsonify({
+                "error": "A file with that name already exists"
+            }), 409
+
+        with os.fdopen(fd, "wb") as output:
+            file.save(output)
+
+        return jsonify({
+            "success": True,
+            "filename": filename
+        }), 201
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    except OSError:
+        app.logger.exception("Failed to save model")
+        return jsonify({"error": "Failed to save model"}), 500
+
+
+# ---------------------------------------------------------
+# Rename model
+# ---------------------------------------------------------
+
+@app.route("/api/models/<filename>", methods=["PATCH"])
+def rename_model(filename):
+    data = parse_json_response_data()
+    new_name = data.get("newName", "")
 
     try:
-        target_dir = get_safe_path(folder)
-        os.makedirs(target_dir, exist_ok=True)
-        dest_path = os.path.join(target_dir, os.path.basename(filename))
+        new_name = validate_filename(new_name)
+
+        old_path = get_safe_path(filename)
+        new_path = get_safe_path(new_name)
+
+        if not os.path.isfile(old_path):
+            return jsonify({"error": "File not found"}), 404
+
+        if old_path == new_path:
+            return jsonify({
+                "success": True,
+                "filename": new_name
+            }), 200
+
+        # Atomic no-overwrite operation for regular files.
+        try:
+            os.link(old_path, new_path)
+        except FileExistsError:
+            return jsonify({
+                "error": "A file with that name already exists"
+            }), 409
+
+        try:
+            os.unlink(old_path)
+        except OSError:
+            # Roll back the new link if the original cannot be removed.
+            try:
+                os.unlink(new_path)
+            except OSError:
+                app.logger.exception("Failed to roll back rename")
+
+            raise
+
+        return jsonify({
+            "success": True,
+            "filename": new_name
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    except OSError:
+        app.logger.exception(
+            "Failed to rename model from %s to %s",
+            filename,
+            new_name
+        )
+        return jsonify({"error": "Failed to rename file"}), 500
+
+
+# ---------------------------------------------------------
+# Delete model
+# ---------------------------------------------------------
+
+@app.route("/api/models/<filename>", methods=["DELETE"])
+def delete_model(filename):
+    try:
+        target_path = get_safe_path(filename)
+
+        if not os.path.isfile(target_path):
+            return jsonify({"error": "File not found"}), 404
+
+        os.remove(target_path)
+
+        return jsonify({
+            "success": True,
+            "filename": filename
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    except OSError:
+        app.logger.exception("Failed to delete model: %s", filename)
+        return jsonify({"error": "Failed to delete file"}), 500
+
+
+# ---------------------------------------------------------
+# Export model
+# ---------------------------------------------------------
+
+@app.route("/api/models/export", methods=["POST"])
+def export_model():
+    try:
+        file, filename = get_uploaded_filename()
+
+        if not filename.lower().endswith(".stl"):
+            filename += ".stl"
+
+        export_dir = os.path.join(MODELS_DIR, "_export")
+        os.makedirs(export_dir, exist_ok=True)
+
+        dest_path = os.path.join(export_dir, filename)
+
+        # Export files may be replaced by subsequent exports.
         file.save(dest_path)
-        return jsonify({'success': True, 'filename': os.path.basename(filename)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/models/folder', methods=['POST'])
-def create_model_folder():
-    data = request.get_json() or {}
-    folder = data.get('path', '').strip()
-    name = data.get('name', '').strip()
-    if not name:
-        return jsonify({'error': 'Folder name required'}), 400
-    try:
-        parent_dir = get_safe_path(folder)
-        new_dir = os.path.join(parent_dir, os.path.basename(name))
-        os.makedirs(new_dir, exist_ok=True)
-        return jsonify({'success': True, 'name': os.path.basename(name)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            "success": True,
+            "filename": filename
+        }), 201
 
-@app.route('/api/models/rename', methods=['POST'])
-def rename_model_item():
-    data = request.get_json() or {}
-    old_rel = data.get('oldPath', '').strip()
-    new_name = data.get('newName', '').strip()
-    if not old_rel or not new_name:
-        return jsonify({'error': 'Path and new name required'}), 400
-    try:
-        old_path = get_safe_path(old_rel)
-        if not os.path.exists(old_path):
-            return jsonify({'error': 'Item not found'}), 404
-        parent_dir = os.path.dirname(old_path)
-        new_path = os.path.join(parent_dir, os.path.basename(new_name))
-        os.rename(old_path, new_path)
-        return jsonify({'success': True, 'newName': os.path.basename(new_name)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-@app.route('/api/models/item', methods=['DELETE'])
-def delete_model_item():
-    rel_path = request.args.get('path', '').strip()
-    if not rel_path:
-        return jsonify({'error': 'Path required'}), 400
-    try:
-        target_path = get_safe_path(rel_path)
-        if not os.path.exists(target_path):
-            return jsonify({'error': 'Item not found'}), 404
-        if os.path.isdir(target_path):
-            import shutil
-            shutil.rmtree(target_path)
-        else:
-            os.remove(target_path)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except OSError:
+        app.logger.exception("Failed to export model")
+        return jsonify({"error": "Failed to export model"}), 500
 
-@app.route('/api/models/export', methods=['POST'])
-def save_exported_stl():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    file = request.files['file']
-    filename = request.form.get('filename', file.filename).strip()
-    if not filename:
-        return jsonify({'error': 'No filename provided'}), 400
-    if not filename.lower().endswith('.stl'):
-        filename += '.stl'
 
-    export_dir = os.path.join(MODELS_DIR, '_export')
-    os.makedirs(export_dir, exist_ok=True)
-    safe_name = os.path.basename(filename)
-    dest_path = os.path.join(export_dir, safe_name)
+# ---------------------------------------------------------
+# Render model
+# ---------------------------------------------------------
 
-    try:
-        file.save(dest_path)
-        return jsonify({'success': True, 'filename': safe_name})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+@app.route("/api/render", methods=["POST"])
+def render_model():
+    data = parse_json_response_data()
 
-@app.route('/render', methods=['POST'])
-def render_scad():
-    data = request.get_json() or {}
-    code = data.get('code', '')
-    params = data.get('params', {})
-    is_preview = data.get('preview', False)
+    code = data.get("code", "")
+    params = data.get("params", {})
+    is_preview = data.get("preview", False)
 
-    if not code:
-        return jsonify({'error': 'No code provided'}), 400
+    if not isinstance(code, str) or not code.strip():
+        return jsonify({"error": "No code provided"}), 400
+
+    if not isinstance(params, dict):
+        return jsonify({"error": "Invalid parameters"}), 400
+
+    openscad = shutil.which("openscad-nightly")
+
+    if not openscad:
+        return jsonify({
+            "error": "OpenSCAD nightly executable not found"
+        }), 500
 
     task_id = str(uuid.uuid4())
+
     scad_path = os.path.join(UPLOAD_DIR, f"{task_id}.scad")
     stl_path = os.path.join(UPLOAD_DIR, f"{task_id}.stl")
 
-    with open(scad_path, "w", encoding="utf-8") as f:
-        f.write(code)
+    def cleanup():
+        for path in (scad_path, stl_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                app.logger.warning("Failed to remove temporary file: %s", path)
 
-    version_mode = data.get('engine', '').strip().lower() or os.environ.get("OPENSCAD_VERSION", "stable").strip().lower()
-    if version_mode == "nightly" and os.path.exists("/usr/bin/openscad-nightly"):
-        cmd = ["openscad-nightly", "--enable=manifold", scad_path, "-o", stl_path]
-    elif version_mode == "nightly" and os.path.exists("/usr/local/bin/openscad-nightly"):
-        cmd = ["/usr/local/bin/openscad-nightly", "--enable=manifold", scad_path, "-o", stl_path]
-    else:
-        cmd = ["openscad", scad_path, "-o", stl_path]
+    try:
+        with open(scad_path, "w", encoding="utf-8") as f:
+            f.write(code)
 
-    if is_preview:
-        cmd.extend([
-            "-D", "$fs=4.0",
-            "-D", "$fa=20.0",
-            "-D", "$fn=12"
-        ])
+        cmd = [
+            openscad,
+            "--backend=cgal",
+            "--export-format=binstl",
+            scad_path,
+            "-o",
+            stl_path
+        ]
 
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if is_preview:
+            cmd.extend([
+                "-D", "$fs=4.0",
+                "-D", "$fa=20.0",
+                "-D", "$fn=12"
+            ])
 
-    if os.path.exists(scad_path):
-        os.remove(scad_path)
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60*5
+        )
 
-    stl_generated = os.path.exists(stl_path) and os.path.getsize(stl_path) > 0
+        stl_generated = (
+            result.returncode == 0
+            and os.path.isfile(stl_path)
+            and os.path.getsize(stl_path) > 0
+        )
 
-    if not stl_generated:
-        err_msg = result.stderr.strip() or result.stdout.strip() or 'OpenSCAD failed to generate STL'
-        return jsonify({'error': err_msg}), 500
+        if not stl_generated:
+            error_message = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "OpenSCAD failed to generate STL"
+            )
 
-    return send_file(stl_path, mimetype='application/sla', as_attachment=False)
+            cleanup()
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+            return jsonify({
+                "error": error_message
+            }), 500
+
+        response = send_file(
+            stl_path,
+            mimetype="application/sla",
+            as_attachment=False,
+            download_name="model.stl"
+        )
+
+        # Delete temporary files after the response has been sent.
+        response.call_on_close(cleanup)
+
+        # The SCAD source is no longer needed.
+        try:
+            os.remove(scad_path)
+        except OSError:
+            app.logger.warning(
+                "Failed to remove temporary SCAD file: %s",
+                scad_path
+            )
+
+        return response
+
+    except subprocess.TimeoutExpired:
+        cleanup()
+
+        return jsonify({
+            "error": "OpenSCAD rendering timed out (120 seconds)"
+        }), 504
+
+    except OSError:
+        cleanup()
+
+        app.logger.exception("OpenSCAD rendering failed")
+
+        return jsonify({
+            "error": "Failed to execute OpenSCAD"
+        }), 500
+
+
+# ---------------------------------------------------------
+# Application
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
