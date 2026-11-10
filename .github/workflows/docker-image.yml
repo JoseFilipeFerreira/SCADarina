@@ -33,6 +33,6 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
-          context: ./scadarina
+          context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: josefilipeferreira/scadarina:latest

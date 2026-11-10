@@ -1,6 +1,6 @@
 # ![SCADarina](img/logo/png/scadarina_64.png) SCADarina
 
-a self-hosted docker container for your personal OpenSCAD generator and model viewer
+A self-hosted Docker container for your personal OpenSCAD generator and model viewer.
 
 ---
 
@@ -13,67 +13,50 @@ _you can find more screenshots under `[/img/screenshots](img/screenshots/)`_
 
 ---
 
-`SCADarina` is the attempt to have your own, self-hosted OpenSCAD local offline generator as the likes of Thingiverse, Printables, or MakerWorld.
-It parses OpenSCAD controls (like you'd see on one of those online generators), but you can also open and alter code directly; I wouldn't setup a document in there though :)
+`SCADarina` is your own self-hosted remote OpenSCAD environment.
 
-- a viewport with different shading options, grid layouts (I tried to mimic the OpenSCAD axis as well), a switch between orthogonal and perspective view, and a basic viewcube as known from most CAD packages
-- can make use of OpenSCAD libraries / dependencies (like e.g. [BOSL2](https://github.com/BelfrySCAD/BOSL2/))
-- you can also open .stl, .obj, and .3mf files to e.g. roughly inspect or measure them
-- that said: a measuring function, snapping to vertices, with delta readings
-- a rudimentary file browser: you can create folders, upload and delete files, or save your current settings
-- works on mobile browsers (but I probably have to spend some time improving on that, haha)
-- has no online dependencies: you can use it offline
-- while you can expose it to the web, there's no safery measures implemented AT ALL; do at your own risk
+- Support for `.stl`, `.obj` and `.3mf` files
+- A viewport with different shading options, grid layouts, a switch between orthogonal and perspective views, and a basic viewcube
+- Measuring function with vertex snapping and delta readings
+- Support for all OpenSCAD libraries and dependencies (e.g. [BOSL2](https://github.com/BelfrySCAD/BOSL2/))
 
-`SCADarina` is **not** WASM. Under the hood, it uses a real `OpenSCAD` backend which runs entirely on the server. This means full support for external libraries, and no bottlenecks from your browser (even on mobile).
-.scad files are sent to a `python-flask-backend`, `OpenSCAD` renders it to a mesh, and this result gets dislayed in the `Three.js` viewport in your browser.
+`SCADarina` is **not** WASM. Under the hood, it uses a real `OpenSCAD` backend that runs entirely on the server. This means full support for external libraries, with no bottlenecks from your browser (even on mobile).
 
-~~Since **v1.1**, you can choose between `stable` and `nightly` builds of `OpenSCAD`. With `nightly`, the very fast `manifold engine` is used. As this can lead to issues with non-manifold designs, this is not the default; as it is really much faster, I would at least try it out. Switching back to `stable` is as easy as changing the variable in the docker, if you have issues :)~~
-Since **v1.2** you can choose between render engines: `stable` and `nightly` builds of `OpenSCAD`. With `nightly`, the very fast `manifold engine` is used. You can adjust directly in the UI, so if `nightly` throws an error, try `stable` instead :)
+`.scad` files are sent to a `Python Flask` backend, where `OpenSCAD` renders them into a mesh. The resulting model is then displayed in the `Three.js` viewport in your browser.
 
 ---
 
-## Changelog
-**v1.2** - 08.10.2026
-- fixed visibility of arrays in `paramaters`
-- enabled support for labeled sub menus from .scad files
-- selection for `render engine` (introduced in v1.1) is moved into the UI (dropdown, upper left); status is saved in `localStorage`
-  - variable `OPENSCAD_VERSION` removed from [docker compose](docker-compose.yml) (the new UI choice overrides the variable, you don't _have to_ manually delete it)
-- size of filebrowser gets also saved in `localStorage`
-- fixed some UI related discrepancies (chevron colour, tooltips, slider controls...)
-- fixed deprecated code calls
+## Run with Docker Compose
 
-**v1.1** - 25.09.2026
-- **New Feature:** Toggle the "up"-axis (choose between `Z is up` / `Y is up`) to correct models created in different systems
-- **New Feature:** support for faster `manifold engine` rendering through `OpenSCAD Nightly`; ~~you can adjust this in the [docker compose](docker-compose.yml)~~
-- mesh-models (STL, OBJ, 3MF) are now automatically grounded onto the grid / axis
-
-**v1 - initial release** - 21.09.2026
-
----
-
-## install with docker compose
-
-Clone the repository and run:
+```yaml
+services:
+  scadarina:
+    image: josefilipeferreira/scadarina:latest
+    container_name: SCADarina
+    restart: unless-stopped
+    ports:
+      - "5343:5000"
+    volumes:
+      - ./models:/app/models
+      - ./libraries:/root/.local/share/OpenSCAD/libraries
+```
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 Access the WebUI at `http://<your-ip>:5343`.
 
 ---
 
-## unRAID Installation
-
-`SCADarina` is not yet part of the community apps plugin: I assembled [UNRAID_INSTALL.md](UNRAID_INSTALL.md) for a step-by-step instruction how to integrate the docker into unRAID with native WebUI, and template support.
-
----
-
 ## Disclaimer
 
-This project relied on vibe-coding; please use another solution if you are not comfortable with this.
-It's not an ideal solution. But it solves an issue for me, maybe it will solve one for you.
+This project started as a fork of an amazing vibe-coded project by [CameraRick](https://github.com/CameraRick/SCADarina).
+
+This project relies, and continues to rely, on mix of vibe coding and Old-school programming.
+
+It's not an ideal solution, but it solves an issue for me. Maybe it will solve one for you.
+
 
 ---
 
